@@ -1,0 +1,4994 @@
+--[[
+    RJC MARKETPLACE BROWSER v4
+
+    SEARCH BACKEND
+    Uses AvatarEditorService:SearchCatalogAsync()
+    instead of the legacy Catalog Search V1 HTTP API.
+
+    FEATURES
+    - Marketplace avatar catalog
+    - Search
+    - Category filters
+    - Subcategory filters
+    - Price filters
+    - Sorting
+    - Pagination
+    - Item thumbnails
+    - Asset + Bundle thumbnails
+    - Thumbnail retrying
+    - Item details
+    - Copy ID
+    - Copy link
+    - Draggable
+    - Minimize
+    - Close
+    - Responsive mobile layout
+    - Viewport clamping
+    - Old GUI cleanup
+
+    UI TEXT IS ASCII ONLY.
+]]
+
+------------------------------------------------------------
+-- SERVICES
+------------------------------------------------------------
+
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local ContentProvider = game:GetService("ContentProvider")
+local AvatarEditorService = game:GetService("AvatarEditorService")
+
+local LocalPlayer = Players.LocalPlayer
+
+------------------------------------------------------------
+-- GLOBAL ENVIRONMENT
+------------------------------------------------------------
+
+local ENV = (getgenv and getgenv()) or _G
+
+------------------------------------------------------------
+-- CONFIG
+------------------------------------------------------------
+
+local CONFIG = {
+    Name = "RJCMarketplaceBrowser",
+
+    Width = 670,
+    Height = 455,
+
+    MinWidth = 315,
+    MinHeight = 245,
+
+    HeaderHeight = 40,
+
+    SidebarWidth = 132,
+
+    CardWidth = 132,
+    CardHeight = 194,
+
+    ResultsPerPage = 28,
+
+    ThumbnailRetries = 3,
+    ThumbnailRetryDelay = 0.35,
+    ThumbnailQueueDelay = 0.08,
+}
+
+------------------------------------------------------------
+-- COLORS
+------------------------------------------------------------
+
+local COLORS = {
+    Background = Color3.fromRGB(11, 20, 28),
+
+    Panel = Color3.fromRGB(16, 29, 38),
+    Panel2 = Color3.fromRGB(21, 38, 48),
+
+    Header = Color3.fromRGB(13, 27, 36),
+
+    Accent = Color3.fromRGB(75, 177, 196),
+    AccentDark = Color3.fromRGB(51, 132, 151),
+
+    Text = Color3.fromRGB(235, 247, 250),
+    SubText = Color3.fromRGB(139, 166, 174),
+
+    Border = Color3.fromRGB(40, 69, 78),
+
+    Hover = Color3.fromRGB(28, 49, 60),
+
+    Thumbnail = Color3.fromRGB(24, 42, 51),
+
+    Good = Color3.fromRGB(112, 216, 169),
+    Bad = Color3.fromRGB(238, 103, 116),
+}
+
+------------------------------------------------------------
+-- CLEAN OLD GUI
+------------------------------------------------------------
+
+pcall(function()
+    if ENV.__RJC_MARKETPLACE_BROWSER then
+        ENV.__RJC_MARKETPLACE_BROWSER:Destroy()
+    end
+end)
+
+ENV.__RJC_MARKETPLACE_BROWSER = nil
+
+pcall(function()
+    local old = CoreGui:FindFirstChild(CONFIG.Name)
+
+    if old then
+        old:Destroy()
+    end
+end)
+
+pcall(function()
+    if LocalPlayer then
+        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+
+        if playerGui then
+            local old = playerGui:FindFirstChild(CONFIG.Name)
+
+            if old then
+                old:Destroy()
+            end
+        end
+    end
+end)
+
+------------------------------------------------------------
+-- UTILITY
+------------------------------------------------------------
+
+local function create(className, properties)
+    local object = Instance.new(className)
+
+    for property, value in pairs(properties or {}) do
+        pcall(function()
+            object[property] = value
+        end)
+    end
+
+    return object
+end
+
+local function corner(parent, radius)
+    return create("UICorner", {
+        CornerRadius = UDim.new(0, radius or 7),
+        Parent = parent,
+    })
+end
+
+local function outline(parent, color, thickness)
+    return create("UIStroke", {
+        Color = color or COLORS.Border,
+        Thickness = thickness or 1,
+        Transparency = 0.18,
+        Parent = parent,
+    })
+end
+
+local function shorten(text, length)
+    text = tostring(text or "")
+
+    if #text <= length then
+        return text
+    end
+
+    return text:sub(1, length - 3) .. "..."
+end
+
+local function formatNumber(number)
+    number = tonumber(number)
+
+    if not number then
+        return "?"
+    end
+
+    local result = tostring(math.floor(number))
+
+    while true do
+        local replacement, count =
+            result:gsub(
+                "^(-?%d+)(%d%d%d)",
+                "%1,%2"
+            )
+
+        result = replacement
+
+        if count == 0 then
+            break
+        end
+    end
+
+    return result
+end
+
+------------------------------------------------------------
+-- CLIPBOARD
+------------------------------------------------------------
+
+local function copy(text)
+    local methods = {
+        function()
+            if setclipboard then
+                setclipboard(text)
+                return true
+            end
+        end,
+
+        function()
+            if toclipboard then
+                toclipboard(text)
+                return true
+            end
+        end,
+
+        function()
+            if set_clipboard then
+                set_clipboard(text)
+                return true
+            end
+        end,
+    }
+
+    for _, method in ipairs(methods) do
+        local ok, result = pcall(method)
+
+        if ok and result then
+            return true
+        end
+    end
+
+    return false
+end
+
+------------------------------------------------------------
+-- ENUM HELPERS
+------------------------------------------------------------
+
+local function getEnumItem(enumObject, candidates)
+    if not enumObject then
+        return nil
+    end
+
+    for _, name in ipairs(candidates) do
+        local ok, value = pcall(function()
+            return enumObject[name]
+        end)
+
+        if ok and value then
+            return value
+        end
+    end
+
+    return nil
+end
+
+local function assetType(name)
+    return getEnumItem(
+        Enum.AvatarAssetType,
+        {name}
+    )
+end
+
+local function bundleType(name)
+    return getEnumItem(
+        Enum.BundleType,
+        {name}
+    )
+end
+
+local function categoryFilter(name)
+    return getEnumItem(
+        Enum.CatalogCategoryFilter,
+        {name}
+    )
+end
+
+local function sortType(...)
+    return getEnumItem(
+        Enum.CatalogSortType,
+        {
+            ...
+        }
+    )
+end
+
+------------------------------------------------------------
+-- SEARCH TYPE HELPERS
+------------------------------------------------------------
+
+local function assets(...)
+    local result = {}
+
+    local names = {
+        ...
+    }
+
+    for _, name in ipairs(names) do
+        local value = assetType(name)
+
+        if value then
+            table.insert(result, value)
+        end
+    end
+
+    return result
+end
+
+local function bundles(...)
+    local result = {}
+
+    local names = {
+        ...
+    }
+
+    for _, name in ipairs(names) do
+        local value = bundleType(name)
+
+        if value then
+            table.insert(result, value)
+        end
+    end
+
+    return result
+end
+
+------------------------------------------------------------
+-- CATEGORY DATA
+------------------------------------------------------------
+
+local CATEGORIES = {
+
+    {
+        name = "All",
+        category = "None",
+
+        subcategories = {
+            {
+                name = "All Items",
+            },
+
+            {
+                name = "Hats",
+                assetTypes = assets("Hat"),
+            },
+
+            {
+                name = "Hair",
+                assetTypes = assets("HairAccessory"),
+            },
+
+            {
+                name = "Faces",
+                assetTypes = assets("Face"),
+            },
+
+            {
+                name = "Classic Clothing",
+                assetTypes = assets(
+                    "TShirt",
+                    "Shirt",
+                    "Pants"
+                ),
+            },
+
+            {
+                name = "Layered Clothing",
+                assetTypes = assets(
+                    "TShirtAccessory",
+                    "ShirtAccessory",
+                    "PantsAccessory",
+                    "JacketAccessory",
+                    "SweaterAccessory",
+                    "ShortsAccessory",
+                    "DressSkirtAccessory",
+                    "LeftShoeAccessory",
+                    "RightShoeAccessory"
+                ),
+            },
+
+            {
+                name = "Accessories",
+                assetTypes = assets(
+                    "Hat",
+                    "HairAccessory",
+                    "FaceAccessory",
+                    "NeckAccessory",
+                    "ShoulderAccessory",
+                    "FrontAccessory",
+                    "BackAccessory",
+                    "WaistAccessory"
+                ),
+            },
+
+            {
+                name = "Body Parts",
+                assetTypes = assets(
+                    "Head",
+                    "Torso",
+                    "LeftArm",
+                    "RightArm",
+                    "LeftLeg",
+                    "RightLeg",
+                    "DynamicHead"
+                ),
+            },
+
+            {
+                name = "Gear",
+                assetTypes = assets("Gear"),
+            },
+
+            {
+                name = "Animations",
+                assetTypes = assets(
+                    "ClimbAnimation",
+                    "FallAnimation",
+                    "IdleAnimation",
+                    "JumpAnimation",
+                    "RunAnimation",
+                    "SwimAnimation",
+                    "WalkAnimation",
+                    "EmoteAnimation",
+                    "MoodAnimation"
+                ),
+            },
+
+            {
+                name = "Bundles",
+                bundleTypes = bundles(
+                    "BodyParts",
+                    "Animations",
+                    "Shoes",
+                    "DynamicHead"
+                ),
+            },
+
+            {
+                name = "Makeup",
+                assetTypes = assets(
+                    "FaceMakeup",
+                    "LipMakeup",
+                    "EyeMakeup",
+                    "EyebrowAccessory",
+                    "EyelashAccessory"
+                ),
+            },
+
+            {
+                name = "Dynamic Heads",
+                assetTypes = assets(
+                    "DynamicHead"
+                ),
+            },
+        },
+    },
+
+    {
+        name = "Collectibles",
+        category = "Collectibles",
+
+        subcategories = {
+            {
+                name = "All Collectibles",
+            },
+        },
+    },
+
+    {
+        name = "Clothing",
+        category = "None",
+
+        subcategories = {
+            {
+                name = "All Clothing",
+
+                assetTypes = assets(
+                    "TShirt",
+                    "Shirt",
+                    "Pants",
+                    "TShirtAccessory",
+                    "ShirtAccessory",
+                    "PantsAccessory",
+                    "JacketAccessory",
+                    "SweaterAccessory",
+                    "ShortsAccessory",
+                    "DressSkirtAccessory",
+                    "LeftShoeAccessory",
+                    "RightShoeAccessory"
+                ),
+            },
+
+            {
+                name = "Classic T-Shirts",
+                assetTypes = assets("TShirt"),
+            },
+
+            {
+                name = "Classic Shirts",
+                assetTypes = assets("Shirt"),
+            },
+
+            {
+                name = "Classic Pants",
+                assetTypes = assets("Pants"),
+            },
+
+            {
+                name = "Layered T-Shirts",
+                assetTypes = assets("TShirtAccessory"),
+            },
+
+            {
+                name = "Layered Shirts",
+                assetTypes = assets("ShirtAccessory"),
+            },
+
+            {
+                name = "Layered Pants",
+                assetTypes = assets("PantsAccessory"),
+            },
+
+            {
+                name = "Jackets",
+                assetTypes = assets("JacketAccessory"),
+            },
+
+            {
+                name = "Sweaters",
+                assetTypes = assets("SweaterAccessory"),
+            },
+
+            {
+                name = "Shorts",
+                assetTypes = assets("ShortsAccessory"),
+            },
+
+            {
+                name = "Dress Skirts",
+                assetTypes = assets("DressSkirtAccessory"),
+            },
+
+            {
+                name = "Shoes",
+                assetTypes = assets(
+                    "LeftShoeAccessory",
+                    "RightShoeAccessory"
+                ),
+            },
+        },
+    },
+
+    {
+        name = "Body",
+        category = "None",
+
+        subcategories = {
+            {
+                name = "All Body",
+
+                assetTypes = assets(
+                    "Head",
+                    "Face",
+                    "Torso",
+                    "LeftArm",
+                    "RightArm",
+                    "LeftLeg",
+                    "RightLeg",
+                    "DynamicHead"
+                ),
+            },
+
+            {
+                name = "Heads",
+                assetTypes = assets(
+                    "Head"
+                ),
+            },
+
+            {
+                name = "Faces",
+                assetTypes = assets(
+                    "Face"
+                ),
+            },
+
+            {
+                name = "Dynamic Heads",
+                assetTypes = assets(
+                    "DynamicHead"
+                ),
+            },
+
+            {
+                name = "Torso",
+                assetTypes = assets(
+                    "Torso"
+                ),
+            },
+
+            {
+                name = "Arms",
+                assetTypes = assets(
+                    "LeftArm",
+                    "RightArm"
+                ),
+            },
+
+            {
+                name = "Legs",
+                assetTypes = assets(
+                    "LeftLeg",
+                    "RightLeg"
+                ),
+            },
+        },
+    },
+
+    {
+        name = "Gear",
+        category = "None",
+
+        subcategories = {
+            {
+                name = "All Gear",
+                assetTypes = assets("Gear"),
+            },
+        },
+    },
+
+    {
+        name = "Accessories",
+        category = "None",
+
+        subcategories = {
+            {
+                name = "All Accessories",
+
+                assetTypes = assets(
+                    "Hat",
+                    "HairAccessory",
+                    "FaceAccessory",
+                    "NeckAccessory",
+                    "ShoulderAccessory",
+                    "FrontAccessory",
+                    "BackAccessory",
+                    "WaistAccessory",
+                    "TShirtAccessory",
+                    "ShirtAccessory",
+                    "PantsAccessory",
+                    "JacketAccessory",
+                    "SweaterAccessory",
+                    "ShortsAccessory",
+                    "DressSkirtAccessory",
+                    "LeftShoeAccessory",
+                    "RightShoeAccessory"
+                ),
+            },
+
+            {
+                name = "Hats",
+                assetTypes = assets("Hat"),
+            },
+
+            {
+                name = "Hair",
+                assetTypes = assets("HairAccessory"),
+            },
+
+            {
+                name = "Face Accessories",
+                assetTypes = assets("FaceAccessory"),
+            },
+
+            {
+                name = "Neck",
+                assetTypes = assets("NeckAccessory"),
+            },
+
+            {
+                name = "Shoulder",
+                assetTypes = assets("ShoulderAccessory"),
+            },
+
+            {
+                name = "Front",
+                assetTypes = assets("FrontAccessory"),
+            },
+
+            {
+                name = "Back",
+                assetTypes = assets("BackAccessory"),
+            },
+
+            {
+                name = "Waist",
+                assetTypes = assets("WaistAccessory"),
+            },
+
+            {
+                name = "T-Shirt Accessories",
+                assetTypes = assets("TShirtAccessory"),
+            },
+
+            {
+                name = "Shirt Accessories",
+                assetTypes = assets("ShirtAccessory"),
+            },
+
+            {
+                name = "Pants Accessories",
+                assetTypes = assets("PantsAccessory"),
+            },
+
+            {
+                name = "Jacket Accessories",
+                assetTypes = assets("JacketAccessory"),
+            },
+
+            {
+                name = "Sweater Accessories",
+                assetTypes = assets("SweaterAccessory"),
+            },
+
+            {
+                name = "Shorts Accessories",
+                assetTypes = assets("ShortsAccessory"),
+            },
+
+            {
+                name = "Shoes",
+                assetTypes = assets(
+                    "LeftShoeAccessory",
+                    "RightShoeAccessory"
+                ),
+            },
+
+            {
+                name = "Makeup",
+                assetTypes = assets(
+                    "FaceMakeup",
+                    "LipMakeup",
+                    "EyeMakeup",
+                    "EyebrowAccessory",
+                    "EyelashAccessory"
+                ),
+            },
+        },
+    },
+
+    {
+        name = "Animations",
+        category = "None",
+
+        subcategories = {
+            {
+                name = "All Animations",
+
+                assetTypes = assets(
+                    "ClimbAnimation",
+                    "FallAnimation",
+                    "IdleAnimation",
+                    "JumpAnimation",
+                    "RunAnimation",
+                    "SwimAnimation",
+                    "WalkAnimation",
+                    "EmoteAnimation",
+                    "MoodAnimation"
+                ),
+
+                bundleTypes = bundles(
+                    "Animations"
+                ),
+            },
+
+            {
+                name = "Movement",
+
+                assetTypes = assets(
+                    "ClimbAnimation",
+                    "FallAnimation",
+                    "IdleAnimation",
+                    "JumpAnimation",
+                    "RunAnimation",
+                    "SwimAnimation",
+                    "WalkAnimation"
+                ),
+            },
+
+            {
+                name = "Emotes",
+
+                assetTypes = assets(
+                    "EmoteAnimation"
+                ),
+            },
+
+            {
+                name = "Mood",
+
+                assetTypes = assets(
+                    "MoodAnimation"
+                ),
+            },
+
+            {
+                name = "Animation Bundles",
+
+                bundleTypes = bundles(
+                    "Animations"
+                ),
+            },
+        },
+    },
+
+    {
+        name = "Bundles",
+        category = "None",
+
+        subcategories = {
+            {
+                name = "All Bundles",
+
+                bundleTypes = bundles(
+                    "BodyParts",
+                    "Animations",
+                    "Shoes",
+                    "DynamicHead"
+                ),
+            },
+
+            {
+                name = "Body Bundles",
+                bundleTypes = bundles(
+                    "BodyParts"
+                ),
+            },
+
+            {
+                name = "Animation Bundles",
+                bundleTypes = bundles(
+                    "Animations"
+                ),
+            },
+
+            {
+                name = "Shoe Bundles",
+                bundleTypes = bundles(
+                    "Shoes"
+                ),
+            },
+
+            {
+                name = "Dynamic Head Bundles",
+                bundleTypes = bundles(
+                    "DynamicHead"
+                ),
+            },
+        },
+    },
+
+    {
+        name = "Community",
+        category = "CommunityCreations",
+
+        subcategories = {
+            {
+                name = "All Community Items",
+            },
+        },
+    },
+
+    {
+        name = "Premium",
+        category = "Premium",
+
+        subcategories = {
+            {
+                name = "All Premium Items",
+            },
+        },
+    },
+}
+
+------------------------------------------------------------
+-- SORT OPTIONS
+------------------------------------------------------------
+
+local SORTS = {
+    {
+        name = "Relevance",
+
+        enum = sortType(
+            "Relevance"
+        ),
+    },
+
+    {
+        name = "Most Favorited",
+
+        enum = sortType(
+            "MostFavorited"
+        ),
+    },
+
+    {
+        name = "Best Selling",
+
+        enum = sortType(
+            "Bestselling",
+            "BestSelling"
+        ),
+    },
+
+    {
+        name = "Recently Created",
+
+        enum = sortType(
+            "RecentlyCreated",
+            "RecentlyUpdated"
+        ),
+    },
+
+    {
+        name = "Price Low to High",
+
+        enum = sortType(
+            "PriceLowToHigh",
+            "PriceAsc"
+        ),
+    },
+
+    {
+        name = "Price High to Low",
+
+        enum = sortType(
+            "PriceHighToLow",
+            "PriceDesc"
+        ),
+    },
+}
+
+------------------------------------------------------------
+-- PRICE OPTIONS
+------------------------------------------------------------
+
+local PRICES = {
+    {
+        name = "Any Price",
+        value = nil,
+    },
+
+    {
+        name = "Free Only",
+        value = 0,
+    },
+
+    {
+        name = "Up to 5 R$",
+        value = 5,
+    },
+
+    {
+        name = "Up to 10 R$",
+        value = 10,
+    },
+
+    {
+        name = "Up to 25 R$",
+        value = 25,
+    },
+
+    {
+        name = "Up to 50 R$",
+        value = 50,
+    },
+
+    {
+        name = "Up to 100 R$",
+        value = 100,
+    },
+
+    {
+        name = "Up to 250 R$",
+        value = 250,
+    },
+
+    {
+        name = "Up to 500 R$",
+        value = 500,
+    },
+
+    {
+        name = "Up to 1000 R$",
+        value = 1000,
+    },
+
+    {
+        name = "Custom Max",
+        value = "custom",
+    },
+}
+
+------------------------------------------------------------
+-- STATE
+------------------------------------------------------------
+
+local state = {
+    categoryIndex = 1,
+    subcategoryIndex = 1,
+
+    sortIndex = 1,
+    priceIndex = 1,
+
+    page = 1,
+
+    pagesObject = nil,
+
+    pageCache = {},
+
+    loading = false,
+
+    selected = nil,
+
+    minimized = false,
+
+    savedHeight = CONFIG.Height,
+}
+
+------------------------------------------------------------
+-- GUI PARENT
+------------------------------------------------------------
+
+local GuiParent = CoreGui
+
+pcall(function()
+    if gethui then
+        GuiParent = gethui()
+    end
+end)
+
+------------------------------------------------------------
+-- SCREEN GUI
+------------------------------------------------------------
+
+local ScreenGui = create(
+    "ScreenGui",
+    {
+        Name = CONFIG.Name,
+
+        ResetOnSpawn = false,
+        IgnoreGuiInset = true,
+
+        ZIndexBehavior =
+            Enum.ZIndexBehavior.Global,
+
+        Parent = GuiParent,
+    }
+)
+
+ENV.__RJC_MARKETPLACE_BROWSER =
+    ScreenGui
+
+------------------------------------------------------------
+-- CAMERA / WINDOW SIZE
+------------------------------------------------------------
+
+local camera =
+    workspace.CurrentCamera
+
+local viewport =
+    camera
+    and camera.ViewportSize
+    or Vector2.new(
+        800,
+        600
+    )
+
+local width =
+    math.min(
+        CONFIG.Width,
+        math.max(
+            CONFIG.MinWidth,
+            viewport.X - 10
+        )
+    )
+
+local height =
+    math.min(
+        CONFIG.Height,
+        math.max(
+            CONFIG.MinHeight,
+            viewport.Y - 10
+        )
+    )
+
+local Window = create(
+    "Frame",
+    {
+        Name = "Window",
+
+        BackgroundColor3 =
+            COLORS.Background,
+
+        BorderSizePixel = 0,
+
+        Size =
+            UDim2.fromOffset(
+                width,
+                height
+            ),
+
+        Position =
+            UDim2.fromOffset(
+                math.max(
+                    5,
+                    (viewport.X - width) / 2
+                ),
+
+                math.max(
+                    5,
+                    (viewport.Y - height) / 2
+                )
+            ),
+
+        ClipsDescendants = true,
+
+        Parent = ScreenGui,
+    }
+)
+
+corner(Window, 11)
+outline(Window)
+
+------------------------------------------------------------
+-- HEADER
+------------------------------------------------------------
+
+local Header = create(
+    "Frame",
+    {
+        BackgroundColor3 =
+            COLORS.Header,
+
+        BorderSizePixel = 0,
+
+        Size =
+            UDim2.new(
+                1,
+                0,
+                0,
+                CONFIG.HeaderHeight
+            ),
+
+        Parent = Window,
+    }
+)
+
+local HeaderTitle = create(
+    "TextLabel",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.fromOffset(
+                12,
+                1
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -105,
+                0,
+                19
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            "RJC MARKETPLACE",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 12,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Left,
+
+        Parent = Header,
+    }
+)
+
+local HeaderSubtitle = create(
+    "TextLabel",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.fromOffset(
+                13,
+                22
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -105,
+                0,
+                11
+            ),
+
+        Font =
+            Enum.Font.Gotham,
+
+        Text =
+            "avatar catalog",
+
+        TextColor3 =
+            COLORS.SubText,
+
+        TextSize = 7,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Left,
+
+        Parent = Header,
+    }
+)
+
+------------------------------------------------------------
+-- HEADER BUTTONS
+------------------------------------------------------------
+
+local MinimizeButton = create(
+    "TextButton",
+    {
+        BackgroundColor3 =
+            COLORS.Panel2,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.new(
+                1,
+                -65,
+                0,
+                7
+            ),
+
+        Size =
+            UDim2.fromOffset(
+                25,
+                25
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            "-",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 14,
+
+        AutoButtonColor = false,
+
+        Parent = Header,
+    }
+)
+
+corner(MinimizeButton, 6)
+
+local CloseButton = create(
+    "TextButton",
+    {
+        BackgroundColor3 =
+            Color3.fromRGB(
+                102,
+                48,
+                57
+            ),
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.new(
+                1,
+                -34,
+                0,
+                7
+            ),
+
+        Size =
+            UDim2.fromOffset(
+                25,
+                25
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            "X",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 11,
+
+        AutoButtonColor = false,
+
+        Parent = Header,
+    }
+)
+
+corner(CloseButton, 6)
+
+------------------------------------------------------------
+-- BODY
+------------------------------------------------------------
+
+local Body = create(
+    "Frame",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.fromOffset(
+                0,
+                CONFIG.HeaderHeight
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                0,
+                1,
+                -CONFIG.HeaderHeight
+            ),
+
+        Parent = Window,
+    }
+)
+
+------------------------------------------------------------
+-- SIDEBAR
+------------------------------------------------------------
+
+local Sidebar = create(
+    "Frame",
+    {
+        BackgroundColor3 =
+            COLORS.Panel,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.fromOffset(
+                6,
+                6
+            ),
+
+        Size =
+            UDim2.new(
+                0,
+                CONFIG.SidebarWidth,
+                1,
+                -12
+            ),
+
+        Parent = Body,
+    }
+)
+
+corner(Sidebar, 8)
+
+local SidebarScroll = create(
+    "ScrollingFrame",
+    {
+        BackgroundTransparency = 1,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.fromOffset(
+                6,
+                6
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -12,
+                1,
+                -12
+            ),
+
+        CanvasSize =
+            UDim2.new(
+                0,
+                0,
+                0,
+                0
+            ),
+
+        AutomaticCanvasSize =
+            Enum.AutomaticSize.Y,
+
+        ScrollBarThickness = 2,
+
+        ScrollBarImageColor3 =
+            COLORS.Accent,
+
+        Parent = Sidebar,
+    }
+)
+
+create(
+    "UIListLayout",
+    {
+        Padding =
+            UDim.new(
+                0,
+                5
+            ),
+
+        HorizontalAlignment =
+            Enum.HorizontalAlignment.Center,
+
+        Parent =
+            SidebarScroll,
+    }
+)
+
+create(
+    "UIPadding",
+    {
+        PaddingBottom =
+            UDim.new(
+                0,
+                8
+            ),
+
+        Parent =
+            SidebarScroll,
+    }
+)
+
+------------------------------------------------------------
+-- DROPDOWN LAYER
+------------------------------------------------------------
+
+local DropdownLayer = create(
+    "Frame",
+    {
+        BackgroundTransparency = 1,
+
+        Size =
+            UDim2.fromScale(
+                1,
+                1
+            ),
+
+        ZIndex = 1000,
+
+        Parent =
+            ScreenGui,
+    }
+)
+
+local activeDropdown
+
+local function closeDropdown()
+    if activeDropdown then
+        pcall(function()
+            activeDropdown:Destroy()
+        end)
+
+        activeDropdown = nil
+    end
+end
+
+------------------------------------------------------------
+-- SIDEBAR SECTION
+------------------------------------------------------------
+
+local function section(title)
+
+    return create(
+        "TextLabel",
+        {
+            BackgroundTransparency = 1,
+
+            Size =
+                UDim2.new(
+                    1,
+                    -2,
+                    0,
+                    13
+                ),
+
+            Font =
+                Enum.Font.GothamBold,
+
+            Text =
+                title:upper(),
+
+            TextColor3 =
+                COLORS.SubText,
+
+            TextSize = 7,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            Parent =
+                SidebarScroll,
+        }
+    )
+end
+
+------------------------------------------------------------
+-- DROPDOWN BUILDER
+------------------------------------------------------------
+
+local function makeDropdown(
+    title,
+    options,
+    getIndex,
+    setIndex
+)
+
+    local holder = create(
+        "Frame",
+        {
+            BackgroundTransparency = 1,
+
+            Size =
+                UDim2.new(
+                    1,
+                    -2,
+                    0,
+                    43
+                ),
+
+            Parent =
+                SidebarScroll,
+        }
+    )
+
+    create(
+        "TextLabel",
+        {
+            BackgroundTransparency = 1,
+
+            Position =
+                UDim2.fromOffset(
+                    1,
+                    0
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -2,
+                    0,
+                    12
+                ),
+
+            Font =
+                Enum.Font.GothamBold,
+
+            Text =
+                title:upper(),
+
+            TextColor3 =
+                COLORS.SubText,
+
+            TextSize = 7,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            Parent =
+                holder,
+        }
+    )
+
+    local button = create(
+        "TextButton",
+        {
+            BackgroundColor3 =
+                COLORS.Panel2,
+
+            BorderSizePixel = 0,
+
+            Position =
+                UDim2.fromOffset(
+                    0,
+                    14
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    0,
+                    0,
+                    28
+                ),
+
+            Font =
+                Enum.Font.Gotham,
+
+            Text = "",
+
+            TextColor3 =
+                COLORS.Text,
+
+            TextSize = 8,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            AutoButtonColor = false,
+
+            Parent =
+                holder,
+        }
+    )
+
+    corner(button, 6)
+    outline(button)
+
+    create(
+        "TextLabel",
+        {
+            BackgroundTransparency = 1,
+
+            Position =
+                UDim2.new(
+                    1,
+                    -20,
+                    0,
+                    0
+                ),
+
+            Size =
+                UDim2.fromOffset(
+                    18,
+                    28
+                ),
+
+            Font =
+                Enum.Font.GothamBold,
+
+            Text =
+                "v",
+
+            TextColor3 =
+                COLORS.SubText,
+
+            TextSize = 9,
+
+            Parent =
+                button,
+        }
+    )
+
+    local function refresh()
+
+        local index =
+            getIndex()
+
+        local option =
+            options[index]
+
+        if option then
+
+            button.Text =
+                "  "
+                .. tostring(
+                    option.name
+                    or option[1]
+                    or ""
+                )
+        end
+    end
+
+    button.Activated:Connect(function()
+
+        closeDropdown()
+
+        local menuHeight =
+            math.min(
+                220,
+                8 + (#options * 27)
+            )
+
+        local menu = create(
+            "ScrollingFrame",
+            {
+                BackgroundColor3 =
+                    COLORS.Panel2,
+
+                BorderSizePixel = 0,
+
+                Size =
+                    UDim2.fromOffset(
+                        math.max(
+                            120,
+                            button.AbsoluteSize.X
+                        ),
+                        menuHeight
+                    ),
+
+                CanvasSize =
+                    UDim2.new(
+                        0,
+                        0,
+                        0,
+                        0
+                    ),
+
+                AutomaticCanvasSize =
+                    Enum.AutomaticSize.Y,
+
+                ScrollBarThickness = 2,
+
+                ScrollBarImageColor3 =
+                    COLORS.Accent,
+
+                ZIndex = 1000,
+
+                Parent =
+                    DropdownLayer,
+            }
+        )
+
+        corner(menu, 7)
+        outline(menu)
+
+        activeDropdown = menu
+
+        create(
+            "UIPadding",
+            {
+                PaddingTop =
+                    UDim.new(
+                        0,
+                        4
+                    ),
+
+                PaddingBottom =
+                    UDim.new(
+                        0,
+                        4
+                    ),
+
+                Parent = menu,
+            }
+        )
+
+        create(
+            "UIListLayout",
+            {
+                Padding =
+                    UDim.new(
+                        0,
+                        1
+                    ),
+
+                Parent = menu,
+            }
+        )
+
+        for index, option in ipairs(options) do
+
+            local optionButton =
+                create(
+                    "TextButton",
+                    {
+                        BackgroundColor3 =
+                            index
+                                == getIndex()
+                            and COLORS.AccentDark
+                            or COLORS.Panel2,
+
+                        BackgroundTransparency =
+                            index
+                                == getIndex()
+                            and 0
+                            or 1,
+
+                        BorderSizePixel = 0,
+
+                        Size =
+                            UDim2.new(
+                                1,
+                                -6,
+                                0,
+                                24
+                            ),
+
+                        Font =
+                            Enum.Font.Gotham,
+
+                        Text =
+                            "  "
+                            .. tostring(
+                                option.name
+                                or option[1]
+                                or ""
+                            ),
+
+                        TextColor3 =
+                            COLORS.Text,
+
+                        TextSize = 8,
+
+                        TextXAlignment =
+                            Enum.TextXAlignment.Left,
+
+                        AutoButtonColor = false,
+
+                        ZIndex = 1001,
+
+                        Parent = menu,
+                    }
+                )
+
+            corner(optionButton, 5)
+
+            optionButton.Activated:Connect(function()
+
+                setIndex(
+                    index,
+                    option
+                )
+
+                refresh()
+
+                closeDropdown()
+            end)
+
+            optionButton.MouseEnter:Connect(function()
+
+                if index ~= getIndex() then
+
+                    optionButton.BackgroundColor3 =
+                        COLORS.Hover
+
+                    optionButton.BackgroundTransparency = 0
+                end
+            end)
+
+            optionButton.MouseLeave:Connect(function()
+
+                if index ~= getIndex() then
+                    optionButton.BackgroundTransparency = 1
+                end
+            end)
+        end
+
+        task.defer(function()
+
+            if not menu.Parent then
+                return
+            end
+
+            local cam =
+                workspace.CurrentCamera
+
+            local screenSize =
+                cam
+                and cam.ViewportSize
+                or Vector2.new(
+                    800,
+                    600
+                )
+
+            local x =
+                button.AbsolutePosition.X
+
+            local y =
+                button.AbsolutePosition.Y
+                + button.AbsoluteSize.Y
+                + 2
+
+            local menuWidth =
+                menu.AbsoluteSize.X
+
+            local menuHeightActual =
+                menu.AbsoluteSize.Y
+
+            x =
+                math.clamp(
+                    x,
+                    3,
+                    math.max(
+                        3,
+                        screenSize.X
+                        - menuWidth
+                        - 3
+                    )
+                )
+
+            y =
+                math.clamp(
+                    y,
+                    3,
+                    math.max(
+                        3,
+                        screenSize.Y
+                        - menuHeightActual
+                        - 3
+                    )
+                )
+
+            menu.Position =
+                UDim2.fromOffset(
+                    x,
+                    y
+                )
+        end)
+    end)
+
+    refresh()
+
+    return holder
+end
+
+------------------------------------------------------------
+-- SEARCH BOX
+------------------------------------------------------------
+
+section("Search")
+
+local SearchHolder = create(
+    "Frame",
+    {
+        BackgroundColor3 =
+            COLORS.Panel2,
+
+        BorderSizePixel = 0,
+
+        Size =
+            UDim2.new(
+                1,
+                -2,
+                0,
+                32
+            ),
+
+        Parent =
+            SidebarScroll,
+    }
+)
+
+corner(SearchHolder, 6)
+
+local SearchBox = create(
+    "TextBox",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.fromOffset(
+                8,
+                0
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -16,
+                1,
+                0
+            ),
+
+        Font =
+            Enum.Font.Gotham,
+
+        PlaceholderText =
+            "Search catalog...",
+
+        PlaceholderColor3 =
+            COLORS.SubText,
+
+        Text = "",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 8,
+
+        ClearTextOnFocus = false,
+
+        Parent =
+            SearchHolder,
+    }
+)
+
+------------------------------------------------------------
+-- CATEGORY
+------------------------------------------------------------
+
+section("Category")
+
+local buildSubcategory
+
+makeDropdown(
+    "Category",
+
+    CATEGORIES,
+
+    function()
+        return state.categoryIndex
+    end,
+
+    function(index)
+
+        state.categoryIndex = index
+        state.subcategoryIndex = 1
+
+        if buildSubcategory then
+            buildSubcategory()
+        end
+    end
+)
+
+------------------------------------------------------------
+-- SUBCATEGORY
+------------------------------------------------------------
+
+section("Subcategory")
+
+local SubcategoryHolder
+
+buildSubcategory = function()
+
+    if SubcategoryHolder then
+        SubcategoryHolder:Destroy()
+        SubcategoryHolder = nil
+    end
+
+    local category =
+        CATEGORIES[
+            state.categoryIndex
+        ]
+
+    if not category then
+        return
+    end
+
+    local holder =
+        create(
+            "Frame",
+            {
+                BackgroundTransparency = 1,
+
+                Size =
+                    UDim2.new(
+                        1,
+                        -2,
+                        0,
+                        43
+                    ),
+
+                Parent =
+                    SidebarScroll,
+            }
+        )
+
+    SubcategoryHolder = holder
+
+    create(
+        "TextLabel",
+        {
+            BackgroundTransparency = 1,
+
+            Position =
+                UDim2.fromOffset(
+                    1,
+                    0
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -2,
+                    0,
+                    12
+                ),
+
+            Font =
+                Enum.Font.GothamBold,
+
+            Text =
+                "SUBCATEGORY",
+
+            TextColor3 =
+                COLORS.SubText,
+
+            TextSize = 7,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            Parent =
+                holder,
+        }
+    )
+
+    local options =
+        category.subcategories
+
+    local button = create(
+        "TextButton",
+        {
+            BackgroundColor3 =
+                COLORS.Panel2,
+
+            BorderSizePixel = 0,
+
+            Position =
+                UDim2.fromOffset(
+                    0,
+                    14
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    0,
+                    0,
+                    28
+                ),
+
+            Font =
+                Enum.Font.Gotham,
+
+            Text = "",
+
+            TextColor3 =
+                COLORS.Text,
+
+            TextSize = 8,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            AutoButtonColor = false,
+
+            Parent =
+                holder,
+        }
+    )
+
+    corner(button, 6)
+    outline(button)
+
+    create(
+        "TextLabel",
+        {
+            BackgroundTransparency = 1,
+
+            Position =
+                UDim2.new(
+                    1,
+                    -20,
+                    0,
+                    0
+                ),
+
+            Size =
+                UDim2.fromOffset(
+                    18,
+                    28
+                ),
+
+            Font =
+                Enum.Font.GothamBold,
+
+            Text =
+                "v",
+
+            TextColor3 =
+                COLORS.SubText,
+
+            TextSize = 9,
+
+            Parent =
+                button,
+        }
+    )
+
+    local function refresh()
+
+        local option =
+            options[
+                state.subcategoryIndex
+            ]
+
+        if option then
+
+            button.Text =
+                "  "
+                .. option.name
+        end
+    end
+
+    refresh()
+
+    button.Activated:Connect(function()
+
+        closeDropdown()
+
+        local menuHeight =
+            math.min(
+                220,
+                8 + (#options * 27)
+            )
+
+        local menu = create(
+            "ScrollingFrame",
+            {
+                BackgroundColor3 =
+                    COLORS.Panel2,
+
+                BorderSizePixel = 0,
+
+                Size =
+                    UDim2.fromOffset(
+                        math.max(
+                            120,
+                            button.AbsoluteSize.X
+                        ),
+                        menuHeight
+                    ),
+
+                CanvasSize =
+                    UDim2.new(
+                        0,
+                        0,
+                        0,
+                        0
+                    ),
+
+                AutomaticCanvasSize =
+                    Enum.AutomaticSize.Y,
+
+                ScrollBarThickness = 2,
+
+                ScrollBarImageColor3 =
+                    COLORS.Accent,
+
+                ZIndex = 1000,
+
+                Parent =
+                    DropdownLayer,
+            }
+        )
+
+        corner(menu, 7)
+        outline(menu)
+
+        activeDropdown = menu
+
+        create(
+            "UIPadding",
+            {
+                PaddingTop =
+                    UDim.new(
+                        0,
+                        4
+                    ),
+
+                PaddingBottom =
+                    UDim.new(
+                        0,
+                        4
+                    ),
+
+                Parent = menu,
+            }
+        )
+
+        create(
+            "UIListLayout",
+            {
+                Padding =
+                    UDim.new(
+                        0,
+                        1
+                    ),
+
+                Parent = menu,
+            }
+        )
+
+        for index, option in ipairs(options) do
+
+            local optionButton =
+                create(
+                    "TextButton",
+                    {
+                        BackgroundColor3 =
+                            index
+                                == state.subcategoryIndex
+                            and COLORS.AccentDark
+                            or COLORS.Panel2,
+
+                        BackgroundTransparency =
+                            index
+                                == state.subcategoryIndex
+                            and 0
+                            or 1,
+
+                        BorderSizePixel = 0,
+
+                        Size =
+                            UDim2.new(
+                                1,
+                                -6,
+                                0,
+                                24
+                            ),
+
+                        Font =
+                            Enum.Font.Gotham,
+
+                        Text =
+                            "  "
+                            .. option.name,
+
+                        TextColor3 =
+                            COLORS.Text,
+
+                        TextSize = 8,
+
+                        TextXAlignment =
+                            Enum.TextXAlignment.Left,
+
+                        AutoButtonColor = false,
+
+                        ZIndex = 1001,
+
+                        Parent = menu,
+                    }
+                )
+
+            corner(optionButton, 5)
+
+            optionButton.Activated:Connect(function()
+
+                state.subcategoryIndex =
+                    index
+
+                refresh()
+
+                closeDropdown()
+            end)
+
+            optionButton.MouseEnter:Connect(function()
+
+                if index
+                    ~= state.subcategoryIndex then
+
+                    optionButton.BackgroundColor3 =
+                        COLORS.Hover
+
+                    optionButton.BackgroundTransparency = 0
+                end
+            end)
+
+            optionButton.MouseLeave:Connect(function()
+
+                if index
+                    ~= state.subcategoryIndex then
+
+                    optionButton.BackgroundTransparency = 1
+                end
+            end)
+        end
+
+        task.defer(function()
+
+            if not menu.Parent then
+                return
+            end
+
+            local cam =
+                workspace.CurrentCamera
+
+            local screenSize =
+                cam
+                and cam.ViewportSize
+                or Vector2.new(
+                    800,
+                    600
+                )
+
+            local x =
+                button.AbsolutePosition.X
+
+            local y =
+                button.AbsolutePosition.Y
+                + button.AbsoluteSize.Y
+                + 2
+
+            local menuWidth =
+                menu.AbsoluteSize.X
+
+            local menuHeightActual =
+                menu.AbsoluteSize.Y
+
+            x =
+                math.clamp(
+                    x,
+                    3,
+                    math.max(
+                        3,
+                        screenSize.X
+                        - menuWidth
+                        - 3
+                    )
+                )
+
+            y =
+                math.clamp(
+                    y,
+                    3,
+                    math.max(
+                        3,
+                        screenSize.Y
+                        - menuHeightActual
+                        - 3
+                    )
+                )
+
+            menu.Position =
+                UDim2.fromOffset(
+                    x,
+                    y
+                )
+        end)
+    end)
+end
+
+buildSubcategory()
+
+------------------------------------------------------------
+-- PRICE
+------------------------------------------------------------
+
+section("Price")
+
+makeDropdown(
+    "Price",
+
+    PRICES,
+
+    function()
+        return state.priceIndex
+    end,
+
+    function(index)
+        state.priceIndex = index
+    end
+)
+
+local CustomPrice = create(
+    "TextBox",
+    {
+        BackgroundColor3 =
+            COLORS.Panel2,
+
+        BorderSizePixel = 0,
+
+        Size =
+            UDim2.new(
+                1,
+                -2,
+                0,
+                29
+            ),
+
+        Font =
+            Enum.Font.Gotham,
+
+        PlaceholderText =
+            "Custom max Robux",
+
+        PlaceholderColor3 =
+            COLORS.SubText,
+
+        Text = "",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 8,
+
+        ClearTextOnFocus = false,
+
+        Parent =
+            SidebarScroll,
+    }
+)
+
+corner(CustomPrice, 6)
+
+------------------------------------------------------------
+-- SORT
+------------------------------------------------------------
+
+section("Sort")
+
+makeDropdown(
+    "Sort",
+
+    SORTS,
+
+    function()
+        return state.sortIndex
+    end,
+
+    function(index)
+        state.sortIndex = index
+    end
+)
+
+------------------------------------------------------------
+-- SEARCH BUTTON
+------------------------------------------------------------
+
+local SearchButton = create(
+    "TextButton",
+    {
+        BackgroundColor3 =
+            COLORS.Accent,
+
+        BorderSizePixel = 0,
+
+        Size =
+            UDim2.new(
+                1,
+                -2,
+                0,
+                33
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            "SEARCH",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 8,
+
+        AutoButtonColor = false,
+
+        Parent =
+            SidebarScroll,
+    }
+)
+
+corner(SearchButton, 7)
+
+------------------------------------------------------------
+-- RESULTS AREA
+------------------------------------------------------------
+
+local ResultsArea = create(
+    "Frame",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.new(
+                0,
+                CONFIG.SidebarWidth + 12,
+                0,
+                6
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -(CONFIG.SidebarWidth + 18),
+                1,
+                -12
+            ),
+
+        Parent = Body,
+    }
+)
+
+------------------------------------------------------------
+-- RESULTS HEADER
+------------------------------------------------------------
+
+local ResultsHeader = create(
+    "Frame",
+    {
+        BackgroundColor3 =
+            COLORS.Panel,
+
+        BorderSizePixel = 0,
+
+        Size =
+            UDim2.new(
+                1,
+                0,
+                0,
+                34
+            ),
+
+        Parent =
+            ResultsArea,
+    }
+)
+
+corner(ResultsHeader, 7)
+
+local ResultStatus = create(
+    "TextLabel",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.fromOffset(
+                10,
+                0
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -140,
+                1,
+                0
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            "Marketplace",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 8,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Left,
+
+        Parent =
+            ResultsHeader,
+    }
+)
+
+local PageLabel = create(
+    "TextLabel",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.new(
+                1,
+                -105,
+                0,
+                0
+            ),
+
+        Size =
+            UDim2.fromOffset(
+                52,
+                34
+            ),
+
+        Font =
+            Enum.Font.Gotham,
+
+        Text =
+            "Page 1",
+
+        TextColor3 =
+            COLORS.SubText,
+
+        TextSize = 7,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Center,
+
+        Parent =
+            ResultsHeader,
+    }
+)
+
+local PreviousButton = create(
+    "TextButton",
+    {
+        BackgroundColor3 =
+            COLORS.Panel2,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.new(
+                1,
+                -54,
+                0,
+                5
+            ),
+
+        Size =
+            UDim2.fromOffset(
+                21,
+                24
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            "<",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 12,
+
+        AutoButtonColor = false,
+
+        Parent =
+            ResultsHeader,
+    }
+)
+
+corner(PreviousButton, 5)
+
+local NextButton = create(
+    "TextButton",
+    {
+        BackgroundColor3 =
+            COLORS.Panel2,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.new(
+                1,
+                -29,
+                0,
+                5
+            ),
+
+        Size =
+            UDim2.fromOffset(
+                21,
+                24
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            ">",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 12,
+
+        AutoButtonColor = false,
+
+        Parent =
+            ResultsHeader,
+    }
+)
+
+corner(NextButton, 5)
+
+------------------------------------------------------------
+-- GRID
+------------------------------------------------------------
+
+local Grid = create(
+    "ScrollingFrame",
+    {
+        BackgroundTransparency = 1,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.fromOffset(
+                0,
+                40
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                0,
+                1,
+                -40
+            ),
+
+        CanvasSize =
+            UDim2.new(
+                0,
+                0,
+                0,
+                0
+            ),
+
+        AutomaticCanvasSize =
+            Enum.AutomaticSize.Y,
+
+        ScrollBarThickness = 3,
+
+        ScrollBarImageColor3 =
+            COLORS.Accent,
+
+        Parent =
+            ResultsArea,
+    }
+)
+
+create(
+    "UIPadding",
+    {
+        PaddingTop =
+            UDim.new(
+                0,
+                5
+            ),
+
+        PaddingBottom =
+            UDim.new(
+                0,
+                5
+            ),
+
+        PaddingLeft =
+            UDim.new(
+                0,
+                2
+            ),
+
+        PaddingRight =
+            UDim.new(
+                0,
+                2
+            ),
+
+        Parent =
+            Grid,
+    }
+)
+
+local GridLayout = create(
+    "UIGridLayout",
+    {
+        CellSize =
+            UDim2.fromOffset(
+                CONFIG.CardWidth,
+                CONFIG.CardHeight
+            ),
+
+        CellPadding =
+            UDim2.fromOffset(
+                6,
+                6
+            ),
+
+        SortOrder =
+            Enum.SortOrder.LayoutOrder,
+
+        Parent =
+            Grid,
+    }
+)
+
+------------------------------------------------------------
+-- EMPTY LABEL
+------------------------------------------------------------
+
+local EmptyLabel = create(
+    "TextLabel",
+    {
+        BackgroundTransparency = 1,
+
+        AnchorPoint =
+            Vector2.new(
+                0.5,
+                0.5
+            ),
+
+        Position =
+            UDim2.fromScale(
+                0.5,
+                0.5
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -20,
+                0,
+                70
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            "Search the Marketplace",
+
+        TextColor3 =
+            COLORS.SubText,
+
+        TextSize = 10,
+
+        TextWrapped = true,
+
+        Parent =
+            Grid,
+    }
+)
+
+------------------------------------------------------------
+-- DETAIL PANEL
+------------------------------------------------------------
+
+local DetailPanel = create(
+    "Frame",
+    {
+        BackgroundColor3 =
+            COLORS.Panel,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.fromOffset(
+                0,
+                40
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                0,
+                0,
+                120
+            ),
+
+        Visible = false,
+
+        Parent =
+            ResultsArea,
+    }
+)
+
+corner(DetailPanel, 7)
+outline(DetailPanel)
+
+local DetailImage = create(
+    "ImageLabel",
+    {
+        BackgroundColor3 =
+            COLORS.Thumbnail,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.fromOffset(
+                8,
+                8
+            ),
+
+        Size =
+            UDim2.fromOffset(
+                104,
+                104
+            ),
+
+        ScaleType =
+            Enum.ScaleType.Fit,
+
+        Parent =
+            DetailPanel,
+    }
+)
+
+corner(DetailImage, 7)
+
+local DetailName = create(
+    "TextLabel",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.fromOffset(
+                122,
+                9
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -132,
+                0,
+                28
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text = "",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 10,
+
+        TextWrapped = true,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Left,
+
+        TextYAlignment =
+            Enum.TextYAlignment.Top,
+
+        Parent =
+            DetailPanel,
+    }
+)
+
+local DetailCreator = create(
+    "TextLabel",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.fromOffset(
+                122,
+                39
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -132,
+                0,
+                16
+            ),
+
+        Font =
+            Enum.Font.Gotham,
+
+        Text = "",
+
+        TextColor3 =
+            COLORS.SubText,
+
+        TextSize = 7,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Left,
+
+        Parent =
+            DetailPanel,
+    }
+)
+
+local DetailPrice = create(
+    "TextLabel",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.fromOffset(
+                122,
+                57
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -132,
+                0,
+                17
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text = "",
+
+        TextColor3 =
+            COLORS.Good,
+
+        TextSize = 8,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Left,
+
+        Parent =
+            DetailPanel,
+    }
+)
+
+local DetailType = create(
+    "TextLabel",
+    {
+        BackgroundTransparency = 1,
+
+        Position =
+            UDim2.fromOffset(
+                122,
+                75
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -132,
+                0,
+                15
+            ),
+
+        Font =
+            Enum.Font.Gotham,
+
+        Text = "",
+
+        TextColor3 =
+            COLORS.SubText,
+
+        TextSize = 7,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Left,
+
+        Parent =
+            DetailPanel,
+    }
+)
+
+local CopyIDButton = create(
+    "TextButton",
+    {
+        BackgroundColor3 =
+            COLORS.Accent,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.new(
+                1,
+                -181,
+                1,
+                -32
+            ),
+
+        Size =
+            UDim2.fromOffset(
+                80,
+                25
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            "COPY ID",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 7,
+
+        AutoButtonColor = false,
+
+        Parent =
+            DetailPanel,
+    }
+)
+
+corner(CopyIDButton, 6)
+
+local CopyLinkButton = create(
+    "TextButton",
+    {
+        BackgroundColor3 =
+            COLORS.Panel2,
+
+        BorderSizePixel = 0,
+
+        Position =
+            UDim2.new(
+                1,
+                -94,
+                1,
+                -32
+            ),
+
+        Size =
+            UDim2.fromOffset(
+                84,
+                25
+            ),
+
+        Font =
+            Enum.Font.GothamBold,
+
+        Text =
+            "COPY LINK",
+
+        TextColor3 =
+            COLORS.Text,
+
+        TextSize = 7,
+
+        AutoButtonColor = false,
+
+        Parent =
+            DetailPanel,
+    }
+)
+
+corner(CopyLinkButton, 6)
+outline(CopyLinkButton)
+
+------------------------------------------------------------
+-- THUMBNAIL QUEUE
+------------------------------------------------------------
+
+local ThumbnailQueue = {}
+local ThumbnailWorkerRunning = false
+
+local function thumbnailContentId(item)
+
+    local id =
+        tonumber(
+            item.Id
+            or item.id
+        )
+
+    if not id then
+        return nil
+    end
+
+    local itemType =
+        tostring(
+            item.ItemType
+            or item.itemType
+            or ""
+        ):lower()
+
+    local isBundle =
+        itemType == "bundle"
+        or itemType == "2"
+
+    if isBundle then
+
+        return
+            "rbxthumb://type=BundleThumbnail&id="
+            .. tostring(id)
+            .. "&w=420&h=420"
+    end
+
+    return
+        "rbxthumb://type=Asset&id="
+        .. tostring(id)
+        .. "&w=420&h=420"
+end
+
+local function loadThumbnail(image, item)
+
+    if not image
+        or not image.Parent then
+        return
+    end
+
+    local contentId =
+        thumbnailContentId(
+            item
+        )
+
+    if not contentId then
+
+        image.Image = ""
+
+        return
+    end
+
+    image.Image =
+        contentId
+
+    task.spawn(function()
+
+        for attempt = 1,
+            CONFIG.ThumbnailRetries do
+
+            if not image.Parent then
+                return
+            end
+
+            local success =
+                pcall(function()
+
+                    ContentProvider:PreloadAsync(
+                        {
+                            image
+                        }
+                    )
+                end)
+
+            if success then
+                return
+            end
+
+            task.wait(
+                CONFIG.ThumbnailRetryDelay
+            )
+
+            if image.Parent then
+                image.Image =
+                    contentId
+            end
+        end
+    end)
+end
+
+local function startThumbnailWorker()
+
+    if ThumbnailWorkerRunning then
+        return
+    end
+
+    ThumbnailWorkerRunning = true
+
+    task.spawn(function()
+
+        while #ThumbnailQueue > 0 do
+
+            local request =
+                table.remove(
+                    ThumbnailQueue,
+                    1
+                )
+
+            if request
+                and request.image
+                and request.image.Parent then
+
+                loadThumbnail(
+                    request.image,
+                    request.item
+                )
+            end
+
+            task.wait(
+                CONFIG.ThumbnailQueueDelay
+            )
+        end
+
+        ThumbnailWorkerRunning = false
+    end)
+end
+
+local function queueThumbnail(
+    image,
+    item
+)
+
+    table.insert(
+        ThumbnailQueue,
+        {
+            image = image,
+            item = item,
+        }
+    )
+
+    startThumbnailWorker()
+end
+
+------------------------------------------------------------
+-- PRICE TEXT
+------------------------------------------------------------
+
+local function getPriceText(item)
+
+    local priceStatus =
+        tostring(
+            item.PriceStatus
+            or item.priceStatus
+            or ""
+        )
+
+    if priceStatus == "Free" then
+        return "FREE"
+    end
+
+    if priceStatus == "OffSale" then
+        return "OFFSALE"
+    end
+
+    local lowestPrice =
+        tonumber(
+            item.LowestPrice
+            or item.lowestPrice
+        )
+
+    if lowestPrice
+        and lowestPrice > 0 then
+
+        return
+            "from "
+            .. formatNumber(
+                lowestPrice
+            )
+            .. " R$"
+    end
+
+    local price =
+        tonumber(
+            item.Price
+            or item.price
+        )
+
+    if price then
+
+        if price == 0 then
+            return "FREE"
+        end
+
+        return
+            formatNumber(
+                price
+            )
+            .. " R$"
+    end
+
+    return "PRICE N/A"
+end
+
+------------------------------------------------------------
+-- CLEAR GRID
+------------------------------------------------------------
+
+local function clearGrid()
+
+    ThumbnailQueue = {}
+
+    for _, child in ipairs(
+        Grid:GetChildren()
+    ) do
+
+        if child:IsA("Frame")
+            or child:IsA("TextButton") then
+
+            child:Destroy()
+        end
+    end
+
+    EmptyLabel.Parent =
+        Grid
+end
+
+------------------------------------------------------------
+-- DETAIL
+------------------------------------------------------------
+
+local function showDetails(item)
+
+    state.selected =
+        item
+
+    DetailImage.Image = ""
+
+    queueThumbnail(
+        DetailImage,
+        item
+    )
+
+    DetailName.Text =
+        tostring(
+            item.Name
+            or "Unnamed Item"
+        )
+
+    DetailCreator.Text =
+        "Creator: "
+        .. tostring(
+            item.CreatorName
+            or "Unknown"
+        )
+
+    DetailPrice.Text =
+        getPriceText(
+            item
+        )
+
+    local id =
+        item.Id
+        or "?"
+
+    local itemType =
+        item.ItemType
+        or "Asset"
+
+    local assetType =
+        item.AssetType
+        or item.BundleType
+        or itemType
+
+    DetailType.Text =
+        "ID: "
+        .. tostring(id)
+        .. "  |  "
+        .. tostring(assetType)
+
+    DetailPanel.Visible =
+        true
+
+    Grid.Position =
+        UDim2.fromOffset(
+            0,
+            166
+        )
+
+    Grid.Size =
+        UDim2.new(
+            1,
+            0,
+            1,
+            -166
+        )
+end
+
+------------------------------------------------------------
+-- HIDE DETAILS
+------------------------------------------------------------
+
+local function hideDetails()
+
+    state.selected = nil
+
+    DetailPanel.Visible =
+        false
+
+    Grid.Position =
+        UDim2.fromOffset(
+            0,
+            40
+        )
+
+    Grid.Size =
+        UDim2.new(
+            1,
+            0,
+            1,
+            -40
+        )
+end
+
+------------------------------------------------------------
+-- CREATE CARD
+------------------------------------------------------------
+
+local function createCard(
+    item,
+    index
+)
+
+    local card =
+        create(
+            "TextButton",
+            {
+                BackgroundColor3 =
+                    COLORS.Panel,
+
+                BorderSizePixel = 0,
+
+                Size =
+                    UDim2.fromOffset(
+                        CONFIG.CardWidth,
+                        CONFIG.CardHeight
+                    ),
+
+                LayoutOrder =
+                    index,
+
+                Text = "",
+
+                AutoButtonColor = false,
+
+                Parent = Grid,
+            }
+        )
+
+    corner(card, 8)
+    outline(card)
+
+    local image =
+        create(
+            "ImageLabel",
+            {
+                BackgroundColor3 =
+                    COLORS.Thumbnail,
+
+                BorderSizePixel = 0,
+
+                Position =
+                    UDim2.fromOffset(
+                        6,
+                        6
+                    ),
+
+                Size =
+                    UDim2.new(
+                        1,
+                        -12,
+                        0,
+                        124
+                    ),
+
+                ScaleType =
+                    Enum.ScaleType.Fit,
+
+                Parent = card,
+            }
+        )
+
+    corner(image, 6)
+
+    create(
+        "TextLabel",
+        {
+            BackgroundTransparency = 1,
+
+            AnchorPoint =
+                Vector2.new(
+                    0.5,
+                    0.5
+                ),
+
+            Position =
+                UDim2.fromScale(
+                    0.5,
+                    0.5
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -10,
+                    0,
+                    18
+                ),
+
+            Font =
+                Enum.Font.Gotham,
+
+            Text =
+                "...",
+
+            TextColor3 =
+                COLORS.SubText,
+
+            TextSize = 7,
+
+            Parent = image,
+        }
+    )
+
+    queueThumbnail(
+        image,
+        item
+    )
+
+    --------------------------------------------------------
+    -- NAME
+    --------------------------------------------------------
+
+    create(
+        "TextLabel",
+        {
+            BackgroundTransparency = 1,
+
+            Position =
+                UDim2.fromOffset(
+                    7,
+                    136
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -14,
+                    0,
+                    28
+                ),
+
+            Font =
+                Enum.Font.GothamBold,
+
+            Text =
+                shorten(
+                    item.Name
+                    or "Unnamed",
+                    30
+                ),
+
+            TextColor3 =
+                COLORS.Text,
+
+            TextSize = 8,
+
+            TextWrapped = true,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            TextYAlignment =
+                Enum.TextYAlignment.Top,
+
+            Parent = card,
+        }
+    )
+
+    --------------------------------------------------------
+    -- CREATOR
+    --------------------------------------------------------
+
+    create(
+        "TextLabel",
+        {
+            BackgroundTransparency = 1,
+
+            Position =
+                UDim2.fromOffset(
+                    7,
+                    166
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -14,
+                    0,
+                    13
+                ),
+
+            Font =
+                Enum.Font.Gotham,
+
+            Text =
+                "@"
+                .. shorten(
+                    item.CreatorName
+                    or "Unknown",
+                    22
+                ),
+
+            TextColor3 =
+                COLORS.SubText,
+
+            TextSize = 6,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            Parent = card,
+        }
+    )
+
+    --------------------------------------------------------
+    -- PRICE
+    --------------------------------------------------------
+
+    local priceStatus =
+        tostring(
+            item.PriceStatus
+            or ""
+        )
+
+    create(
+        "TextLabel",
+        {
+            BackgroundTransparency = 1,
+
+            Position =
+                UDim2.fromOffset(
+                    7,
+                    179
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -14,
+                    0,
+                    13
+                ),
+
+            Font =
+                Enum.Font.GothamBold,
+
+            Text =
+                getPriceText(
+                    item
+                ),
+
+            TextColor3 =
+                priceStatus == "OffSale"
+                and COLORS.Bad
+                or COLORS.Good,
+
+            TextSize = 7,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            Parent = card,
+        }
+    )
+
+    --------------------------------------------------------
+    -- ACTIVATION
+    --------------------------------------------------------
+
+    card.Activated:Connect(function()
+
+        showDetails(
+            item
+        )
+    end)
+
+    card.MouseEnter:Connect(function()
+
+        card.BackgroundColor3 =
+            COLORS.Hover
+    end)
+
+    card.MouseLeave:Connect(function()
+
+        card.BackgroundColor3 =
+            COLORS.Panel
+    end)
+
+    return card
+end
+
+------------------------------------------------------------
+-- BUILD SEARCH PARAMETERS
+------------------------------------------------------------
+
+local function buildSearchParameters()
+
+    local params =
+        CatalogSearchParams.new()
+
+    --------------------------------------------------------
+    -- Keyword
+    --------------------------------------------------------
+
+    params.SearchKeyword =
+        tostring(
+            SearchBox.Text
+            or ""
+        )
+
+    --------------------------------------------------------
+    -- Limit
+    --------------------------------------------------------
+
+    params.Limit =
+        CONFIG.ResultsPerPage
+
+    --------------------------------------------------------
+    -- No offsale spam
+    --------------------------------------------------------
+
+    params.IncludeOffSale =
+        false
+
+    --------------------------------------------------------
+    -- Category
+    --------------------------------------------------------
+
+    local category =
+        CATEGORIES[
+            state.categoryIndex
+        ]
+
+    if category then
+
+        local filter =
+            categoryFilter(
+                category.category
+            )
+
+        if filter then
+            params.CategoryFilter =
+                filter
+        end
+    end
+
+    --------------------------------------------------------
+    -- Subcategory
+    --------------------------------------------------------
+
+    if category then
+
+        local subcategory =
+            category.subcategories[
+                state.subcategoryIndex
+            ]
+
+        if subcategory then
+
+            local assetTypes =
+                subcategory.assetTypes
+
+            local bundleTypes =
+                subcategory.bundleTypes
+
+            if assetTypes
+                and #assetTypes > 0 then
+
+                params.AssetTypes =
+                    assetTypes
+            end
+
+            if bundleTypes
+                and #bundleTypes > 0 then
+
+                params.BundleTypes =
+                    bundleTypes
+            end
+        end
+    end
+
+    --------------------------------------------------------
+    -- Price
+    --------------------------------------------------------
+
+    local price =
+        PRICES[
+            state.priceIndex
+        ]
+
+    if price then
+
+        if price.value == "custom" then
+
+            local custom =
+                tonumber(
+                    CustomPrice.Text
+                )
+
+            if custom then
+
+                params.MaxPrice =
+                    math.max(
+                        0,
+                        math.floor(
+                            custom
+                        )
+                    )
+            end
+
+        elseif price.value
+            ~= nil then
+
+            params.MaxPrice =
+                price.value
+        end
+    end
+
+    --------------------------------------------------------
+    -- Sort
+    --------------------------------------------------------
+
+    local sort =
+        SORTS[
+            state.sortIndex
+        ]
+
+    if sort
+        and sort.enum then
+
+        params.SortType =
+            sort.enum
+    end
+
+    --------------------------------------------------------
+    -- Sales aggregation
+    --------------------------------------------------------
+
+    local currentSort =
+        sort
+        and sort.name
+        or ""
+
+    if currentSort ==
+            "Most Favorited"
+
+        or currentSort ==
+            "Best Selling"
+    then
+
+        local allTime =
+            getEnumItem(
+                Enum.CatalogSortAggregation,
+                {
+                    "AllTime"
+                }
+            )
+
+        if allTime then
+            params.SortAggregation =
+                allTime
+        end
+    end
+
+    return params
+end
+
+------------------------------------------------------------
+-- DISPLAY PAGE
+------------------------------------------------------------
+
+local function displayPage(
+    items,
+    pageNumber
+)
+
+    clearGrid()
+    hideDetails()
+
+    state.page =
+        pageNumber
+
+    PageLabel.Text =
+        "Page "
+        .. tostring(
+            pageNumber
+        )
+
+    if not items
+        or #items == 0 then
+
+        EmptyLabel.Visible =
+            true
+
+        EmptyLabel.Text =
+            "No items found.\nTry another search."
+
+        ResultStatus.Text =
+            "Marketplace  |  0 items"
+
+        return
+    end
+
+    EmptyLabel.Visible =
+        false
+
+    ResultStatus.Text =
+        "Marketplace  |  "
+        .. tostring(
+            #items
+        )
+        .. " items"
+
+    for index, item in ipairs(items) do
+
+        createCard(
+            item,
+            index
+        )
+    end
+end
+
+------------------------------------------------------------
+-- SEARCH MARKETPLACE
+------------------------------------------------------------
+
+local function searchMarketplace()
+
+    if state.loading then
+        return
+    end
+
+    state.loading = true
+
+    closeDropdown()
+
+    hideDetails()
+
+    clearGrid()
+
+    ResultStatus.Text =
+        "Searching..."
+
+    EmptyLabel.Visible =
+        true
+
+    EmptyLabel.Text =
+        "Searching Marketplace..."
+
+    state.pagesObject =
+        nil
+
+    state.pageCache =
+        {}
+
+    state.page =
+        1
+
+    local params
+
+    local parameterOk,
+        parameterResult =
+        pcall(function()
+
+            return buildSearchParameters()
+
+        end)
+
+    if not parameterOk then
+
+        state.loading = false
+
+        ResultStatus.Text =
+            "Search setup failed"
+
+        EmptyLabel.Text =
+            tostring(
+                parameterResult
+            )
+
+        return
+    end
+
+    params =
+        parameterResult
+
+    --------------------------------------------------------
+    -- Native Roblox catalog search
+    --------------------------------------------------------
+
+    local searchOk,
+        pagesOrError =
+        pcall(function()
+
+            return
+                AvatarEditorService:
+                SearchCatalogAsync(
+                    params
+                )
+
+        end)
+
+    if not searchOk
+        or not pagesOrError then
+
+        state.loading = false
+
+        ResultStatus.Text =
+            "Search failed"
+
+        EmptyLabel.Text =
+            "Roblox rejected the catalog search.\n\n"
+            .. shorten(
+                tostring(
+                    pagesOrError
+                ),
+                220
+            )
+
+        return
+    end
+
+    state.pagesObject =
+        pagesOrError
+
+    --------------------------------------------------------
+    -- Get first page
+    --------------------------------------------------------
+
+    local pageOk,
+        itemsOrError =
+        pcall(function()
+
+            return
+                state.pagesObject:
+                GetCurrentPage()
+
+        end)
+
+    if not pageOk
+        or type(itemsOrError)
+            ~= "table" then
+
+        state.loading = false
+
+        ResultStatus.Text =
+            "Page failed"
+
+        EmptyLabel.Text =
+            shorten(
+                tostring(
+                    itemsOrError
+                ),
+                220
+            )
+
+        return
+    end
+
+    local items =
+        itemsOrError
+
+    state.pageCache[1] =
+        items
+
+    state.loading = false
+
+    displayPage(
+        items,
+        1
+    )
+end
+
+------------------------------------------------------------
+-- NEXT PAGE
+------------------------------------------------------------
+
+local function nextPage()
+
+    if state.loading then
+        return
+    end
+
+    if not state.pagesObject then
+        return
+    end
+
+    --------------------------------------------------------
+    -- Already cached
+    --------------------------------------------------------
+
+    local cached =
+        state.pageCache[
+            state.page + 1
+        ]
+
+    if cached then
+
+        displayPage(
+            cached,
+            state.page + 1
+        )
+
+        return
+    end
+
+    --------------------------------------------------------
+    -- Finished
+    --------------------------------------------------------
+
+    if state.pagesObject.IsFinished then
+        return
+    end
+
+    state.loading = true
+
+    ResultStatus.Text =
+        "Loading page..."
+
+    local ok,
+        errorMessage =
+        pcall(function()
+
+            state.pagesObject:
+                AdvanceToNextPageAsync()
+
+        end)
+
+    if not ok then
+
+        state.loading = false
+
+        ResultStatus.Text =
+            "Page failed"
+
+        EmptyLabel.Visible =
+            true
+
+        EmptyLabel.Text =
+            shorten(
+                tostring(
+                    errorMessage
+                ),
+                220
+            )
+
+        return
+    end
+
+    local pageOk,
+        items =
+        pcall(function()
+
+            return
+                state.pagesObject:
+                GetCurrentPage()
+
+        end)
+
+    if not pageOk
+        or type(items)
+            ~= "table" then
+
+        state.loading = false
+
+        ResultStatus.Text =
+            "Page failed"
+
+        EmptyLabel.Visible =
+            true
+
+        EmptyLabel.Text =
+            tostring(
+                items
+            )
+
+        return
+    end
+
+    local newPage =
+        state.page + 1
+
+    state.pageCache[newPage] =
+        items
+
+    state.loading = false
+
+    displayPage(
+        items,
+        newPage
+    )
+end
+
+------------------------------------------------------------
+-- PREVIOUS PAGE
+------------------------------------------------------------
+
+local function previousPage()
+
+    if state.loading then
+        return
+    end
+
+    if state.page <= 1 then
+        return
+    end
+
+    local previous =
+        state.pageCache[
+            state.page - 1
+        ]
+
+    if not previous then
+        return
+    end
+
+    displayPage(
+        previous,
+        state.page - 1
+    )
+end
+
+------------------------------------------------------------
+-- SEARCH BUTTON
+------------------------------------------------------------
+
+SearchButton.Activated:Connect(function()
+
+    searchMarketplace()
+end)
+
+------------------------------------------------------------
+-- ENTER TO SEARCH
+------------------------------------------------------------
+
+SearchBox.FocusLost:Connect(function(
+    enterPressed
+)
+
+    if enterPressed then
+        searchMarketplace()
+    end
+end)
+
+------------------------------------------------------------
+-- NEXT / PREVIOUS
+------------------------------------------------------------
+
+NextButton.Activated:Connect(function()
+    nextPage()
+end)
+
+PreviousButton.Activated:Connect(function()
+    previousPage()
+end)
+
+------------------------------------------------------------
+-- COPY ID
+------------------------------------------------------------
+
+CopyIDButton.Activated:Connect(function()
+
+    if not state.selected then
+        return
+    end
+
+    local id =
+        tostring(
+            state.selected.Id
+            or state.selected.id
+            or ""
+        )
+
+    if id == "" then
+        return
+    end
+
+    if copy(id) then
+
+        CopyIDButton.Text =
+            "COPIED"
+
+        task.delay(
+            1,
+            function()
+
+                if CopyIDButton.Parent then
+
+                    CopyIDButton.Text =
+                        "COPY ID"
+                end
+            end
+        )
+
+    else
+
+        CopyIDButton.Text =
+            "NO CLIPBOARD"
+
+        task.delay(
+            1,
+            function()
+
+                if CopyIDButton.Parent then
+
+                    CopyIDButton.Text =
+                        "COPY ID"
+                end
+            end
+        )
+    end
+end)
+
+------------------------------------------------------------
+-- COPY LINK
+------------------------------------------------------------
+
+CopyLinkButton.Activated:Connect(function()
+
+    if not state.selected then
+        return
+    end
+
+    local id =
+        tostring(
+            state.selected.Id
+            or ""
+        )
+
+    local itemType =
+        tostring(
+            state.selected.ItemType
+            or ""
+        ):lower()
+
+    local isBundle =
+        itemType == "bundle"
+        or itemType == "2"
+
+    local url
+
+    if isBundle then
+
+        url =
+            "https://www.roblox.com/bundles/"
+            .. id
+            .. "/"
+
+    else
+
+        url =
+            "https://www.roblox.com/catalog/"
+            .. id
+            .. "/"
+    end
+
+    if copy(url) then
+
+        CopyLinkButton.Text =
+            "COPIED"
+
+        task.delay(
+            1,
+            function()
+
+                if CopyLinkButton.Parent then
+
+                    CopyLinkButton.Text =
+                        "COPY LINK"
+                end
+            end
+        )
+    else
+
+        CopyLinkButton.Text =
+            "NO CLIPBOARD"
+
+        task.delay(
+            1,
+            function()
+
+                if CopyLinkButton.Parent then
+
+                    CopyLinkButton.Text =
+                        "COPY LINK"
+                end
+            end
+        )
+    end
+end)
+
+------------------------------------------------------------
+-- DRAGGING
+------------------------------------------------------------
+
+local dragging = false
+local dragStart
+local windowStart
+
+Header.InputBegan:Connect(function(input)
+
+    if
+        input.UserInputType
+            == Enum.UserInputType.MouseButton1
+
+        or input.UserInputType
+            == Enum.UserInputType.Touch
+    then
+
+        dragging = true
+
+        dragStart =
+            input.Position
+
+        windowStart =
+            Window.Position
+
+        input.Changed:Connect(function()
+
+            if
+                input.UserInputState
+                    == Enum.UserInputState.End
+            then
+
+                dragging = false
+            end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+
+    if not dragging then
+        return
+    end
+
+    if
+        input.UserInputType
+            ~= Enum.UserInputType.MouseMovement
+
+        and input.UserInputType
+            ~= Enum.UserInputType.Touch
+    then
+
+        return
+    end
+
+    local delta =
+        input.Position
+        - dragStart
+
+    local newX =
+        windowStart.X.Offset
+        + delta.X
+
+    local newY =
+        windowStart.Y.Offset
+        + delta.Y
+
+    local cam =
+        workspace.CurrentCamera
+
+    if cam then
+
+        local size =
+            cam.ViewportSize
+
+        local windowSize =
+            Window.AbsoluteSize
+
+        newX =
+            math.clamp(
+                newX,
+                4,
+                math.max(
+                    4,
+                    size.X
+                    - windowSize.X
+                    - 4
+                )
+            )
+
+        newY =
+            math.clamp(
+                newY,
+                4,
+                math.max(
+                    4,
+                    size.Y
+                    - windowSize.Y
+                    - 4
+                )
+            )
+    end
+
+    Window.Position =
+        UDim2.fromOffset(
+            newX,
+            newY
+        )
+end)
+
+------------------------------------------------------------
+-- CLAMP WINDOW
+------------------------------------------------------------
+
+local function clampWindow()
+
+    local cam =
+        workspace.CurrentCamera
+
+    if not cam then
+        return
+    end
+
+    local size =
+        cam.ViewportSize
+
+    local targetWidth =
+        math.min(
+            Window.AbsoluteSize.X,
+            math.max(
+                120,
+                size.X - 8
+            )
+        )
+
+    local targetHeight
+
+    if state.minimized then
+
+        targetHeight =
+            CONFIG.HeaderHeight
+
+    else
+
+        targetHeight =
+            math.min(
+                Window.AbsoluteSize.Y,
+                math.max(
+                    60,
+                    size.Y - 8
+                )
+            )
+    end
+
+    Window.Size =
+        UDim2.fromOffset(
+            targetWidth,
+            targetHeight
+        )
+
+    local x =
+        Window.Position.X.Offset
+
+    local y =
+        Window.Position.Y.Offset
+
+    x =
+        math.clamp(
+            x,
+            4,
+            math.max(
+                4,
+                size.X
+                - targetWidth
+                - 4
+            )
+        )
+
+    y =
+        math.clamp(
+            y,
+            4,
+            math.max(
+                4,
+                size.Y
+                - targetHeight
+                - 4
+            )
+        )
+
+    Window.Position =
+        UDim2.fromOffset(
+            x,
+            y
+        )
+end
+
+------------------------------------------------------------
+-- MINIMIZE
+------------------------------------------------------------
+
+local function setMinimized(value)
+
+    state.minimized =
+        value
+
+    closeDropdown()
+
+    if value then
+
+        state.savedHeight =
+            Window.AbsoluteSize.Y
+
+        Body.Visible = false
+
+        Window.Size =
+            UDim2.fromOffset(
+                Window.AbsoluteSize.X,
+                CONFIG.HeaderHeight
+            )
+
+        MinimizeButton.Text =
+            "+"
+
+    else
+
+        Body.Visible = true
+
+        Window.Size =
+            UDim2.fromOffset(
+                Window.AbsoluteSize.X,
+                math.max(
+                    CONFIG.MinHeight,
+                    math.min(
+                        state.savedHeight,
+                        CONFIG.Height
+                    )
+                )
+            )
+
+        MinimizeButton.Text =
+            "-"
+    end
+
+    clampWindow()
+end
+
+MinimizeButton.Activated:Connect(function()
+
+    setMinimized(
+        not state.minimized
+    )
+end)
+
+------------------------------------------------------------
+-- CLOSE
+------------------------------------------------------------
+
+CloseButton.Activated:Connect(function()
+
+    closeDropdown()
+
+    ThumbnailQueue = {}
+
+    ENV.__RJC_MARKETPLACE_BROWSER =
+        nil
+
+    pcall(function()
+        ScreenGui:Destroy()
+    end)
+end)
+
+------------------------------------------------------------
+-- OUTSIDE DROPDOWN CLICK
+------------------------------------------------------------
+
+UserInputService.InputBegan:Connect(function(input)
+
+    if
+        input.UserInputType
+            ~= Enum.UserInputType.MouseButton1
+
+        and input.UserInputType
+            ~= Enum.UserInputType.Touch
+    then
+
+        return
+    end
+
+    if not activeDropdown then
+        return
+    end
+
+    local point =
+        input.Position
+
+    local position =
+        activeDropdown.AbsolutePosition
+
+    local size =
+        activeDropdown.AbsoluteSize
+
+    local inside =
+        point.X >= position.X
+        and point.X
+            <= position.X + size.X
+        and point.Y >= position.Y
+        and point.Y
+            <= position.Y + size.Y
+
+    if not inside then
+        closeDropdown()
+    end
+end)
+
+------------------------------------------------------------
+-- RESPONSIVE GRID
+------------------------------------------------------------
+
+local function updateGrid()
+
+    local resultWidth =
+        ResultsArea.AbsoluteSize.X
+
+    if resultWidth <= 0 then
+        return
+    end
+
+    local columns =
+        math.floor(
+            resultWidth
+            / (
+                CONFIG.CardWidth
+                + 6
+            )
+        )
+
+    columns =
+        math.max(
+            1,
+            columns
+        )
+
+    local available =
+        resultWidth
+        - 10
+        - (
+            (columns - 1)
+            * 6
+        )
+
+    local cardWidth =
+        math.floor(
+            available
+            / columns
+        )
+
+    cardWidth =
+        math.max(
+            95,
+            math.min(
+                CONFIG.CardWidth,
+                cardWidth
+            )
+        )
+
+    GridLayout.CellSize =
+        UDim2.fromOffset(
+            cardWidth,
+            CONFIG.CardHeight
+        )
+end
+
+Window:GetPropertyChangedSignal(
+    "AbsoluteSize"
+):Connect(function()
+
+    updateGrid()
+end)
+
+ResultsArea:GetPropertyChangedSignal(
+    "AbsoluteSize"
+):Connect(function()
+
+    updateGrid()
+end)
+
+------------------------------------------------------------
+-- MOBILE WINDOW WATCHER
+------------------------------------------------------------
+
+task.spawn(function()
+
+    while ScreenGui.Parent do
+
+        clampWindow()
+        updateGrid()
+
+        task.wait(
+            0.5
+        )
+    end
+end)
+
+------------------------------------------------------------
+-- INITIAL SEARCH
+------------------------------------------------------------
+
+task.defer(function()
+
+    updateGrid()
+    clampWindow()
+
+    searchMarketplace()
+end)
